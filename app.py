@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from collections import deque
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from pymongo import MongoClient, ASCENDING
@@ -102,7 +102,7 @@ STORAGE_FILE = Path("conversation_data.json")
 def get_or_create_session(phone_number: str) -> dict:
     """Get existing session or create new one, load chat history"""
     if sessions_collection is None:
-        return {"phone_number": phone_number, "history": [], "last_activity": datetime.now()}
+        return {"phone_number": phone_number, "history": [], "last_activity": datetime.now(timezone.utc)}
     
     # Check if session exists and is not expired
     session = sessions_collection.find_one({"phone_number": phone_number})
@@ -111,7 +111,7 @@ def get_or_create_session(phone_number: str) -> dict:
         # Session exists, update last activity
         sessions_collection.update_one(
             {"phone_number": phone_number},
-            {"$set": {"last_activity": datetime.now()}}
+            {"$set": {"last_activity": datetime.now(timezone.utc)}}
         )
         print(f"✅ Existing session found for {phone_number}")
         return session
@@ -125,8 +125,8 @@ def get_or_create_session(phone_number: str) -> dict:
         new_session = {
             "phone_number": phone_number,
             "history": [],  # Fresh conversation history for AI
-            "last_activity": datetime.now(),
-            "created_at": datetime.now()
+            "last_activity": datetime.now(timezone.utc),
+            "created_at": datetime.now(timezone.utc)
         }
         
         sessions_collection.insert_one(new_session)
@@ -143,14 +143,16 @@ def save_message_to_db(phone_number: str, sender: str, content: str, msg_type: s
     if chats_collection is None:
         return
     
+    current_time = datetime.now(timezone.utc)
     message = {
         "phone_number": phone_number,
         "sender": sender,
         "content": content,
-        "timestamp": datetime.now(),
+        "timestamp": current_time,
         "type": msg_type
     }
     
+    print(f"💾 Storing message with timestamp: {current_time.isoformat()}")
     chats_collection.insert_one(message)
 
 def get_chat_history(phone_number: str, limit: int = 50):
@@ -170,7 +172,7 @@ def update_human_takeover(phone_number: str, status: bool):
     
     sessions_collection.update_one(
         {"phone_number": phone_number},
-        {"$set": {"human_takeover": status, "last_activity": datetime.now()}},
+        {"$set": {"human_takeover": status, "last_activity": datetime.now(timezone.utc)}},
         upsert=True
     )
 
@@ -259,7 +261,7 @@ async def store_message(phone_number: str, sender: str, content: str, msg_type: 
         MESSAGE_STORE[phone_number].append({
             "sender": sender,
             "content": content,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": msg_type
         })
 
@@ -377,7 +379,7 @@ async def whatsapp_webhook(request: Request):
     print(f"\n🔵 New message from {user_number}: {user_message}")
 
     # Track when user last messaged (for 24-hour window)
-    LAST_USER_MESSAGE_TIME[user_number] = datetime.now()
+    LAST_USER_MESSAGE_TIME[user_number] = datetime.now(timezone.utc)
 
     # Store user message to permanent chat history
     await store_message(user_number, "user", user_message, "user")
@@ -493,12 +495,19 @@ async def get_messages(phone_number: str):
     if mongo_client is not None:
         # Get from MongoDB
         messages = get_chat_history(phone_number, limit=100)
-        return [{
+        result = [{
             "sender": msg["sender"],
             "content": msg["content"],
             "timestamp": msg["timestamp"].isoformat(),
             "type": msg["type"]
         } for msg in messages]
+        
+        if result:
+            print(f"📤 Sending {len(result)} messages for {phone_number}")
+            print(f"   First message timestamp: {result[0]['timestamp']}")
+            print(f"   Last message timestamp: {result[-1]['timestamp']}")
+        
+        return result
     else:
         # Fallback to in-memory storage
         return MESSAGE_STORE.get(phone_number, [])
