@@ -184,6 +184,26 @@ def get_human_takeover_status(phone_number: str) -> bool:
     session = sessions_collection.find_one({"phone_number": phone_number})
     return session.get("human_takeover", False) if session else False
 
+def set_pending_confirmation(phone_number: str, status: bool):
+    """Set pending confirmation status"""
+    if sessions_collection is None:
+        PENDING_HUMAN_CONFIRMATION[phone_number] = status
+        return
+    
+    sessions_collection.update_one(
+        {"phone_number": phone_number},
+        {"$set": {"pending_confirmation": status, "last_activity": datetime.now(timezone.utc)}},
+        upsert=True
+    )
+
+def get_pending_confirmation(phone_number: str) -> bool:
+    """Check if waiting for user confirmation"""
+    if sessions_collection is None:
+        return PENDING_HUMAN_CONFIRMATION.get(phone_number, False)
+    
+    session = sessions_collection.find_one({"phone_number": phone_number})
+    return session.get("pending_confirmation", False) if session else False
+
 # -------- LOAD PERSISTENT DATA (Fallback) --------
 def load_data():
     """Load conversations from file (fallback if MongoDB fails)"""
@@ -247,6 +267,28 @@ def is_human_request(text: str) -> bool:
     ]
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in human_keywords)
+
+def is_confirmation_response(text: str) -> tuple[bool, bool]:
+    """
+    Check if message is a yes/no response
+    Returns: (is_response, is_yes)
+    """
+    text_lower = text.lower().strip()
+    
+    # Yes responses
+    yes_keywords = ["yes", "yeah", "yep", "sure", "ok", "okay", "fine", "please", "connect", "proceed"]
+    # No responses
+    no_keywords = ["no", "nope", "nah", "not now", "later", "cancel", "nevermind", "never mind"]
+    
+    is_yes = any(keyword in text_lower for keyword in yes_keywords)
+    is_no = any(keyword in text_lower for keyword in no_keywords)
+    
+    if is_yes:
+        return (True, True)
+    elif is_no:
+        return (True, False)
+    else:
+        return (False, False)
 
 # -------- STORE MESSAGE (NON-BLOCKING) --------
 async def store_message(phone_number: str, sender: str, content: str, msg_type: str):
@@ -392,32 +434,69 @@ async def whatsapp_webhook(request: Request):
         return Response(content=str(resp), media_type="text/xml")
 
     try:
+        # Check if we're waiting for confirmation
+        if get_pending_confirmation(user_number):
+            is_response, is_yes = is_confirmation_response(user_message)
+            
+            if is_response:
+                if is_yes:
+                    # User confirmed - send template and activate human takeover
+                    print(f"✅ User confirmed human connection: {user_number}")
+                    
+                    try:
+                        twilio_message = twilio_client.messages.create(
+                            from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
+                            to=user_number,
+                            content_sid=HUMAN_TAKEOVER_SID
+                        )
+                        
+                        # Store template message
+                        await store_message(user_number, "agent", "Connecting you to a support executive...", "ai")
+                        
+                        print(f"✅ Human takeover template sent, SID: {twilio_message.sid}")
+                        
+                        # Activate human takeover
+                        update_human_takeover(user_number, True)
+                        set_pending_confirmation(user_number, False)
+                        
+                        # Return empty response since template was sent
+                        return Response(content=str(resp), media_type="text/xml")
+                        
+                    except Exception as template_error:
+                        print(f"❌ Failed to send human takeover template: {template_error}")
+                        error_msg = "Sorry, I couldn't connect you right now. Please try again."
+                        await store_message(user_number, "agent", error_msg, "ai")
+                        resp.message().body(error_msg)
+                        set_pending_confirmation(user_number, False)
+                        return Response(content=str(resp), media_type="text/xml")
+                else:
+                    # User said no - continue with AI
+                    print(f"❌ User declined human connection: {user_number}")
+                    set_pending_confirmation(user_number, False)
+                    
+                    confirmation_msg = "No problem! I'll continue helping you. What can I assist you with?"
+                    await store_message(user_number, "agent", confirmation_msg, "ai")
+                    resp.message().body(confirmation_msg)
+                    return Response(content=str(resp), media_type="text/xml")
+            else:
+                # Not a clear yes/no - treat as a new question and clear pending state
+                print(f"⚠️ User sent different message while pending confirmation: {user_message}")
+                set_pending_confirmation(user_number, False)
+                # Fall through to normal AI processing below
+        
         # Check if user is asking for a human
         if is_human_request(user_message):
             print(f"👤 User requested human agent: {user_number}")
             
-            # Send human takeover template
-            try:
-                twilio_message = twilio_client.messages.create(
-                    from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-                    to=user_number,
-                    content_sid=HUMAN_TAKEOVER_SID
-                )
-                
-                # Store template message
-                await store_message(user_number, "agent", "Connecting you to a human agent...", "ai")
-                
-                print(f"✅ Human takeover template sent, SID: {twilio_message.sid}")
-                
-                # Automatically activate human takeover
-                update_human_takeover(user_number, True)
-                
-                # Return empty response since template was sent
-                return Response(content=str(resp), media_type="text/xml")
-                
-            except Exception as template_error:
-                print(f"❌ Failed to send human takeover template: {template_error}")
-                # Fall through to AI response if template fails
+            # Ask for confirmation
+            set_pending_confirmation(user_number, True)
+            confirmation_msg = "Would you like me to connect you to a support executive?"
+            
+            await store_message(user_number, "agent", confirmation_msg, "ai")
+            resp.message().body(confirmation_msg)
+            
+            print(f"❓ Confirmation request sent to {user_number}")
+            return Response(content=str(resp), media_type="text/xml")
         
         reply = await ask_chatgpt(user_number, user_message)
         print(f"DEBUG: AI Reply to {user_number} -> {reply}")
