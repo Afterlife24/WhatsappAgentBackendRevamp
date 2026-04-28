@@ -66,6 +66,8 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER") # Your registered business number
 CONTENT_SID = os.getenv("CONTENT_SID") # The 'HX...' ID from Content Editor
 HUMAN_TAKEOVER_SID = os.getenv("HUMAN_TAKEOVER_SID") # Template for human takeover
+OWNER_ALERT_SID = os.getenv("OWNER_ALERT_SID") # Template for owner alert
+OWNER_WHATSAPP_NUMBER = os.getenv("OWNER_WHATSAPP_NUMBER") # Owner's WhatsApp number
 
 twilio_client = None
 if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
@@ -155,14 +157,20 @@ def save_message_to_db(phone_number: str, sender: str, content: str, msg_type: s
     print(f"💾 Storing message with timestamp: {current_time.isoformat()}")
     chats_collection.insert_one(message)
 
-def get_chat_history(phone_number: str, limit: int = 50):
+def get_chat_history(phone_number: str, limit: int = None):
     """Get chat history from MongoDB"""
     if chats_collection is None:
         return []
     
-    return list(chats_collection.find(
+    query = chats_collection.find(
         {"phone_number": phone_number}
-    ).sort("timestamp", 1).limit(limit))
+    ).sort("timestamp", 1)
+    
+    # Only apply limit if specified
+    if limit:
+        query = query.limit(limit)
+    
+    return list(query)
 
 def update_human_takeover(phone_number: str, status: bool):
     """Update human takeover status in session"""
@@ -444,6 +452,7 @@ async def whatsapp_webhook(request: Request):
                     print(f"✅ User confirmed human connection: {user_number}")
                     
                     try:
+                        # Send template to customer
                         twilio_message = twilio_client.messages.create(
                             from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
                             to=user_number,
@@ -454,6 +463,21 @@ async def whatsapp_webhook(request: Request):
                         await store_message(user_number, "agent", "Connecting you to a support executive...", "ai")
                         
                         print(f"✅ Human takeover template sent, SID: {twilio_message.sid}")
+                        
+                        # Send alert to owner
+                        try:
+                            print(f"📤 Sending owner alert - SID: {OWNER_ALERT_SID}, To: {OWNER_WHATSAPP_NUMBER}")
+                            owner_alert = twilio_client.messages.create(
+                                from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
+                                to=f"whatsapp:{OWNER_WHATSAPP_NUMBER}",
+                                content_sid=OWNER_ALERT_SID,
+                                content_variables=json.dumps({
+                                    "1": user_number  # Customer phone number
+                                })
+                            )
+                            print(f"✅ Owner alert sent, SID: {owner_alert.sid}")
+                        except Exception as alert_error:
+                            print(f"⚠️ Failed to send owner alert: {alert_error}")
                         
                         # Activate human takeover
                         update_human_takeover(user_number, True)
@@ -557,11 +581,20 @@ async def get_conversations():
                 sort=[("timestamp", -1)]
             )
             
+            # Add timezone info to timestamp
+            timestamp_str = ""
+            if last_chat:
+                iso_time = last_chat["timestamp"].isoformat()
+                if not iso_time.endswith(('Z', '+00:00')):
+                    timestamp_str = iso_time + "+00:00"
+                else:
+                    timestamp_str = iso_time
+            
             conversations.append({
                 "phone_number": phone_number,
                 "human_takeover": session.get("human_takeover", False),
                 "last_message": last_chat["content"] if last_chat else "",
-                "last_message_time": last_chat["timestamp"].isoformat() if last_chat else ""
+                "last_message_time": timestamp_str
             })
     else:
         # Fallback to in-memory storage
@@ -585,19 +618,15 @@ async def get_messages(phone_number: str):
     phone_number = phone_number.replace("%3A", ":")
     
     if mongo_client is not None:
-        # Get from MongoDB
-        messages = get_chat_history(phone_number, limit=100)
+        # Get from MongoDB - get ALL messages (no limit)
+        messages = get_chat_history(phone_number, limit=None)
+        
         result = [{
             "sender": msg["sender"],
             "content": msg["content"],
-            "timestamp": msg["timestamp"].isoformat(),
+            "timestamp": msg["timestamp"].isoformat() + "+00:00" if not msg["timestamp"].isoformat().endswith(('Z', '+00:00')) else msg["timestamp"].isoformat(),
             "type": msg["type"]
         } for msg in messages]
-        
-        if result:
-            print(f"📤 Sending {len(result)} messages for {phone_number}")
-            print(f"   First message timestamp: {result[0]['timestamp']}")
-            print(f"   Last message timestamp: {result[-1]['timestamp']}")
         
         return result
     else:
