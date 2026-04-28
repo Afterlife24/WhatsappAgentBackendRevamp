@@ -470,22 +470,35 @@ async def whatsapp_webhook(request: Request):
                         set_pending_confirmation(user_number, False)
                         return Response(content=str(resp), media_type="text/xml")
                 else:
-                    # User said no - continue with AI
+                    # User said no - continue with AI and DON'T check for human request again
                     print(f"❌ User declined human connection: {user_number}")
                     set_pending_confirmation(user_number, False)
                     
-                    confirmation_msg = "No problem! I'll continue helping you. What can I assist you with?"
-                    await store_message(user_number, "agent", confirmation_msg, "ai")
-                    resp.message().body(confirmation_msg)
+                    # Check if user included a question in their "no" response
+                    # e.g., "No, I need to know about company more"
+                    if len(user_message.split()) > 3:  # More than just "no" or "nope"
+                        # User included additional text, process it as a question
+                        print(f"📝 User declined and asked a question: {user_message}")
+                        
+                        reply = await ask_chatgpt(user_number, user_message)
+                        await store_message(user_number, "agent", reply, "ai")
+                        resp.message().body(reply)
+                    else:
+                        # Just a simple "no"
+                        confirmation_msg = "No problem! I'll continue helping you. What can I assist you with?"
+                        await store_message(user_number, "agent", confirmation_msg, "ai")
+                        resp.message().body(confirmation_msg)
+                    
                     return Response(content=str(resp), media_type="text/xml")
             else:
-                # Not a clear yes/no - treat as a new question and clear pending state
-                print(f"⚠️ User sent different message while pending confirmation: {user_message}")
+                # Not a clear yes/no - treat as a new question, clear pending state, and process normally
+                print(f"⚠️ User sent different message while pending confirmation, clearing state: {user_message}")
                 set_pending_confirmation(user_number, False)
-                # Fall through to normal AI processing below
+                # Continue to normal AI processing (don't check for human request again)
+                # This prevents false triggers when user asks new questions after saying "no"
         
-        # Check if user is asking for a human
-        if is_human_request(user_message):
+        # Only check for human request if NOT coming from a pending confirmation state
+        elif is_human_request(user_message):
             print(f"👤 User requested human agent: {user_number}")
             
             # Ask for confirmation
