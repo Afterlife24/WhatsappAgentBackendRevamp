@@ -167,15 +167,19 @@ def get_chat_history(phone_number: str, limit: int = None):
     if chats_collection is None:
         return []
     
-    query = chats_collection.find(
-        {"phone_number": phone_number}
-    ).sort("timestamp", 1)
-    
-    # Only apply limit if specified
-    if limit:
-        query = query.limit(limit)
-    
-    return list(query)
+    try:
+        query = chats_collection.find(
+            {"phone_number": phone_number}
+        ).sort("timestamp", 1)
+        
+        # Only apply limit if specified
+        if limit:
+            query = query.limit(limit)
+        
+        return list(query)
+    except Exception as e:
+        print(f"⚠️ Error fetching chat history: {e}")
+        return []  # Return empty list on error to prevent crashes
 
 def update_human_takeover(phone_number: str, status: bool):
     """Update human takeover status in session"""
