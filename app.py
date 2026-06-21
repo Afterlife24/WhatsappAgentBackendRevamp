@@ -30,6 +30,8 @@ KB_CHECK_INTERVAL_HOURS = 24  # How often to check for KB updates per user
 load_dotenv()
 
 # --- LOAD ALL ENV VARS ONCE AT STARTUP ---
+
+
 class Config:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY")
     MONGODB_URL: str = os.getenv("MONGODB_URL")
@@ -38,9 +40,11 @@ class Config:
     TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN")
     TWILIO_WHATSAPP_NUMBER: str = os.getenv("TWILIO_WHATSAPP_NUMBER")
     CONTENT_SID: str = os.getenv("CONTENT_SID")
+    FORM_SENDING_SID: str = os.getenv("FORM_SENDING_SID")
     HUMAN_TAKEOVER_SID: str = os.getenv("HUMAN_TAKEOVER_SID")
     OWNER_ALERT_SID: str = os.getenv("OWNER_ALERT_SID")
     OWNER_WHATSAPP_NUMBER: str = os.getenv("OWNER_WHATSAPP_NUMBER")
+
 
 config = Config()
 
@@ -56,7 +60,8 @@ sessions_collection = None
 chats_collection = None
 
 try:
-    mongo_client = AsyncIOMotorClient(MONGODB_URL, serverSelectionTimeoutMS=5000)
+    mongo_client = AsyncIOMotorClient(
+        MONGODB_URL, serverSelectionTimeoutMS=5000)
     db = mongo_client[MONGODB_DATABASE]
     sessions_collection = db['sessions']
     chats_collection = db['chats']
@@ -70,6 +75,7 @@ TWILIO_ACCOUNT_SID = config.TWILIO_ACCOUNT_SID
 TWILIO_AUTH_TOKEN = config.TWILIO_AUTH_TOKEN
 TWILIO_WHATSAPP_NUMBER = config.TWILIO_WHATSAPP_NUMBER
 CONTENT_SID = config.CONTENT_SID
+FORM_SENDING_SID = config.FORM_SENDING_SID
 HUMAN_TAKEOVER_SID = config.HUMAN_TAKEOVER_SID
 OWNER_ALERT_SID = config.OWNER_ALERT_SID
 OWNER_WHATSAPP_NUMBER = config.OWNER_WHATSAPP_NUMBER
@@ -84,6 +90,8 @@ if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
 app = FastAPI()
 
 # --- CREATE INDEXES ON STARTUP ---
+
+
 @app.on_event("startup")
 async def create_indexes():
     if mongo_client is None or sessions_collection is None:
@@ -120,9 +128,11 @@ with open("system_prompt.txt", "r", encoding="utf-8") as f:
 with open("knowledge_base.txt", "r", encoding="utf-8") as f:
     KNOWLEDGE_BASE = f.read()
 
+
 def get_kb_hash() -> str:
     """Return MD5 hash of the current knowledge_base.txt content."""
     return hashlib.md5(KNOWLEDGE_BASE.encode("utf-8")).hexdigest()
+
 
 def reload_knowledge_base() -> str:
     """Re-read knowledge_base.txt from disk and return fresh content."""
@@ -130,6 +140,7 @@ def reload_knowledge_base() -> str:
     with open("knowledge_base.txt", "r", encoding="utf-8") as f:
         KNOWLEDGE_BASE = f.read()
     return KNOWLEDGE_BASE
+
 
 # Greeting sent once on first message only
 GREETING_MESSAGE = "Hi! Welcome to Autonomiq AI.\n\nWhat brings you here today?"
@@ -150,7 +161,8 @@ LAST_USER_MESSAGE_TIME = {}  # Track when user last messaged
 STORAGE_FILE = Path("conversation_data.json")
 
 # -------- SESSION CACHE (5-minute TTL, reduces MongoDB reads) --------
-SESSION_CACHE: dict = {}          # {phone_number: {"data": dict, "expires_at": float}}
+# {phone_number: {"data": dict, "expires_at": float}}
+SESSION_CACHE: dict = {}
 SESSION_CACHE_TTL = 300           # 5 minutes in seconds
 
 # -------- DASHBOARD CACHE (30-second TTL) --------
@@ -160,7 +172,8 @@ CONVERSATIONS_CACHE: dict = {"data": None, "expires_at": 0.0}
 INFLIGHT_REQUESTS: dict = {}      # {cache_key: asyncio.Future}
 
 # -------- FAQ RESPONSE CACHE (1-hour TTL) --------
-OPENAI_RESPONSE_CACHE: dict = {}  # {normalized_message: {"reply": str, "expires_at": float}}
+# {normalized_message: {"reply": str, "expires_at": float}}
+OPENAI_RESPONSE_CACHE: dict = {}
 FAQ_CACHE_TTL = 3600              # 1 hour in seconds
 
 # Keywords that indicate an FAQ-style cacheable question
@@ -189,6 +202,7 @@ NON_CACHEABLE_EXACT = {
     "explain more",
     "can you explain"
 }
+
 
 def is_faq_cacheable(message: str) -> bool:
     normalized = " ".join(
@@ -237,6 +251,7 @@ def is_faq_cacheable(message: str) -> bool:
 
     return False
 
+
 def faq_cache_get(normalized_key: str) -> str | None:
     """Return cached reply if valid, else None."""
     entry = OPENAI_RESPONSE_CACHE.get(normalized_key)
@@ -244,6 +259,7 @@ def faq_cache_get(normalized_key: str) -> str | None:
         return entry["reply"]
     OPENAI_RESPONSE_CACHE.pop(normalized_key, None)
     return None
+
 
 def faq_cache_set(normalized_key: str, reply: str):
     """Store reply in FAQ cache with TTL."""
@@ -253,6 +269,8 @@ def faq_cache_set(normalized_key: str, reply: str):
     }
 
 # -------- SESSION CACHE HELPERS --------
+
+
 def _cache_get(phone_number: str) -> dict | None:
     """Return cached session if still valid, else None."""
     entry = SESSION_CACHE.get(phone_number)
@@ -262,12 +280,14 @@ def _cache_get(phone_number: str) -> dict | None:
     SESSION_CACHE.pop(phone_number, None)
     return None
 
+
 def _cache_set(phone_number: str, session: dict):
     """Store session in cache with TTL."""
     SESSION_CACHE[phone_number] = {
         "data": session,
         "expires_at": time.monotonic() + SESSION_CACHE_TTL
     }
+
 
 def _cache_update(phone_number: str, fields: dict):
     """Merge fields into an existing cached session (if present)."""
@@ -276,17 +296,21 @@ def _cache_update(phone_number: str, fields: dict):
         entry["data"].update(fields)
         entry["expires_at"] = time.monotonic() + SESSION_CACHE_TTL
 
+
 def _cache_invalidate(phone_number: str):
     """Remove a session from cache."""
     SESSION_CACHE.pop(phone_number, None)
 
 # -------- MONGODB HELPER FUNCTIONS --------
+
+
 async def get_or_create_session(phone_number: str) -> dict:
     cached = _cache_get(phone_number)
     if cached:
         return cached
     if sessions_collection is None:
-        session = {"phone_number": phone_number, "history": [], "last_activity": datetime.now(timezone.utc)}
+        session = {"phone_number": phone_number, "history": [],
+                   "last_activity": datetime.now(timezone.utc)}
         _cache_set(phone_number, session)
         return session
     try:
@@ -309,15 +333,17 @@ async def get_or_create_session(phone_number: str) -> dict:
             _cache_set(phone_number, new_session)
             return new_session
     except Exception:
-        session = {"phone_number": phone_number, "history": [], "last_activity": datetime.now(timezone.utc)}
+        session = {"phone_number": phone_number, "history": [],
+                   "last_activity": datetime.now(timezone.utc)}
         _cache_set(phone_number, session)
         return session
+
 
 async def save_message_to_db(phone_number: str, sender: str, content: str, msg_type: str, response_time_ms: int = None):
     """Save message to permanent chat history"""
     if chats_collection is None:
         return
-    
+
     current_time = datetime.now(timezone.utc)
     message = {
         "phone_number": phone_number,
@@ -343,19 +369,21 @@ async def save_message_to_db(phone_number: str, sender: str, content: str, msg_t
             "type": msg_type
         })
 
+
 async def get_chat_history(phone_number: str, limit: int = None):
     """Get chat history from MongoDB"""
     if chats_collection is None:
         return []
-    
+
     cursor = chats_collection.find(
         {"phone_number": phone_number}
     ).sort("timestamp", 1)
-    
+
     if limit:
         cursor = cursor.limit(limit)
-    
+
     return await cursor.to_list(length=limit or None)
+
 
 async def update_human_takeover(phone_number: str, status: bool):
     if sessions_collection is None:
@@ -364,13 +392,15 @@ async def update_human_takeover(phone_number: str, status: bool):
     try:
         await sessions_collection.update_one(
             {"phone_number": phone_number},
-            {"$set": {"human_takeover": status, "last_activity": datetime.now(timezone.utc)}},
+            {"$set": {"human_takeover": status,
+                      "last_activity": datetime.now(timezone.utc)}},
             upsert=True
         )
         _cache_update(phone_number, {"human_takeover": status})
     except Exception:
         HUMAN_TAKEOVER[phone_number] = status
         _cache_invalidate(phone_number)
+
 
 async def get_human_takeover_status(phone_number: str) -> bool:
     cached = _cache_get(phone_number)
@@ -386,6 +416,7 @@ async def get_human_takeover_status(phone_number: str) -> bool:
     except Exception:
         return HUMAN_TAKEOVER.get(phone_number, False)
 
+
 async def set_pending_confirmation(phone_number: str, status: bool):
     if sessions_collection is None:
         PENDING_HUMAN_CONFIRMATION[phone_number] = status
@@ -393,13 +424,15 @@ async def set_pending_confirmation(phone_number: str, status: bool):
     try:
         await sessions_collection.update_one(
             {"phone_number": phone_number},
-            {"$set": {"pending_confirmation": status, "last_activity": datetime.now(timezone.utc)}},
+            {"$set": {"pending_confirmation": status,
+                      "last_activity": datetime.now(timezone.utc)}},
             upsert=True
         )
         _cache_update(phone_number, {"pending_confirmation": status})
     except Exception:
         PENDING_HUMAN_CONFIRMATION[phone_number] = status
         _cache_invalidate(phone_number)
+
 
 async def get_pending_confirmation(phone_number: str) -> bool:
     cached = _cache_get(phone_number)
@@ -414,6 +447,7 @@ async def get_pending_confirmation(phone_number: str) -> bool:
         return session.get("pending_confirmation", False) if session else False
     except Exception:
         return PENDING_HUMAN_CONFIRMATION.get(phone_number, False)
+
 
 async def has_been_greeted(phone_number: str) -> bool:
     """Check if user has already received the greeting"""
@@ -430,6 +464,7 @@ async def has_been_greeted(phone_number: str) -> bool:
     except Exception:
         return phone_number in USER_HISTORY and len(USER_HISTORY[phone_number]) > 0
 
+
 async def set_greeted(phone_number: str):
     """Mark user as greeted"""
     if sessions_collection is None:
@@ -437,12 +472,14 @@ async def set_greeted(phone_number: str):
     try:
         await sessions_collection.update_one(
             {"phone_number": phone_number},
-            {"$set": {"greeted": True, "last_activity": datetime.now(timezone.utc)}},
+            {"$set": {"greeted": True,
+                      "last_activity": datetime.now(timezone.utc)}},
             upsert=True
         )
         _cache_update(phone_number, {"greeted": True})
     except Exception as e:
         print(f"⚠️ set_greeted DB write failed: {e.__class__.__name__}")
+
 
 async def set_kb_injected(phone_number: str, status: bool = True):
     """Mark knowledge base injection status for this session"""
@@ -451,9 +488,11 @@ async def set_kb_injected(phone_number: str, status: bool = True):
         return
     await sessions_collection.update_one(
         {"phone_number": phone_number},
-        {"$set": {"kb_injected": status, "last_activity": datetime.now(timezone.utc)}},
+        {"$set": {"kb_injected": status,
+                  "last_activity": datetime.now(timezone.utc)}},
         upsert=True
     )
+
 
 async def get_kb_check_info(phone_number: str) -> dict:
     """Return stored kb_hash and kb_last_checked for this user session."""
@@ -477,6 +516,7 @@ async def get_kb_check_info(phone_number: str) -> dict:
         pass
     return {"kb_hash": None, "kb_last_checked": None}
 
+
 async def update_kb_check_info(phone_number: str, kb_hash: str):
     """Store the latest KB hash and check timestamp for this user."""
     now = datetime.now(timezone.utc)
@@ -492,19 +532,22 @@ async def update_kb_check_info(phone_number: str, kb_hash: str):
             }},
             upsert=True
         )
-        _cache_update(phone_number, {"kb_hash": kb_hash, "kb_last_checked": now})
+        _cache_update(
+            phone_number, {"kb_hash": kb_hash, "kb_last_checked": now})
     except Exception as e:
         print(f"⚠️ update_kb_check_info failed: {e.__class__.__name__}")
 
 # -------- LOAD PERSISTENT DATA (Fallback) --------
+
+
 def load_data():
     """Load conversations from file (fallback if MongoDB fails)"""
     global MESSAGE_STORE, LAST_USER_MESSAGE_TIME, HUMAN_TAKEOVER
-    
+
     if mongo_client is not None:
         print("✅ Using MongoDB, skipping JSON file load")
         return
-    
+
     if STORAGE_FILE.exists():
         try:
             with open(STORAGE_FILE, 'r', encoding='utf-8') as f:
@@ -513,24 +556,26 @@ def load_data():
                 HUMAN_TAKEOVER = data.get('human_takeover', {})
                 last_times = data.get('last_message_times', {})
                 LAST_USER_MESSAGE_TIME = {
-                    phone: datetime.fromisoformat(time_str) 
+                    phone: datetime.fromisoformat(time_str)
                     for phone, time_str in last_times.items()
                 }
-            print(f"✅ Loaded {len(MESSAGE_STORE)} conversations from JSON file")
+            print(
+                f"✅ Loaded {len(MESSAGE_STORE)} conversations from JSON file")
         except Exception as e:
             print(f"⚠️ Error loading data: {e}")
+
 
 def save_data():
     """Save conversations to file (fallback if MongoDB fails)"""
     if mongo_client is not None:
         return  # MongoDB handles persistence
-    
+
     try:
         data = {
             'messages': MESSAGE_STORE,
             'human_takeover': HUMAN_TAKEOVER,
             'last_message_times': {
-                phone: time.isoformat() 
+                phone: time.isoformat()
                 for phone, time in LAST_USER_MESSAGE_TIME.items()
             }
         }
@@ -539,15 +584,19 @@ def save_data():
     except Exception as e:
         print(f"⚠️ Error saving data: {e}")
 
+
 # Load data on startup
 load_data()
 
 # -------- IMAGE REQUEST DETECTION --------
+
+
 def is_image_request(text: str) -> bool:
     return any(
         word in text.lower()
         for word in ["image", "images", "photo", "photos", "picture", "show"]
     )
+
 
 # -------- GREETING DETECTION --------
 GREETING_KEYWORDS = {
@@ -556,12 +605,15 @@ GREETING_KEYWORDS = {
     "namaste", "salam", "salaam", "bonjour", "hola"
 }
 
+
 def is_greeting(text: str) -> bool:
     """Return True if the message is just a greeting with no other intent."""
     cleaned = text.lower().strip().rstrip("!.,?")
     return cleaned in GREETING_KEYWORDS
 
 # -------- HUMAN REQUEST DETECTION --------
+
+
 def is_human_request(text: str) -> bool:
     """Detect if user is asking to speak to a human"""
     human_keywords = [
@@ -574,21 +626,24 @@ def is_human_request(text: str) -> bool:
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in human_keywords)
 
+
 def is_confirmation_response(text: str) -> tuple[bool, bool]:
     """
     Check if message is a yes/no response
     Returns: (is_response, is_yes)
     """
     text_lower = text.lower().strip()
-    
+
     # Yes responses
-    yes_keywords = ["yes", "yeah", "yep", "sure", "ok", "okay", "fine", "please", "connect", "proceed"]
+    yes_keywords = ["yes", "yeah", "yep", "sure", "ok",
+                    "okay", "fine", "please", "connect", "proceed"]
     # No responses
-    no_keywords = ["no", "nope", "nah", "not now", "later", "cancel", "nevermind", "never mind"]
-    
+    no_keywords = ["no", "nope", "nah", "not now",
+                   "later", "cancel", "nevermind", "never mind"]
+
     is_yes = any(keyword in text_lower for keyword in yes_keywords)
     is_no = any(keyword in text_lower for keyword in no_keywords)
-    
+
     if is_yes:
         return (True, True)
     elif is_no:
@@ -597,6 +652,8 @@ def is_confirmation_response(text: str) -> tuple[bool, bool]:
         return (False, False)
 
 # -------- STORE MESSAGE (NON-BLOCKING) --------
+
+
 async def store_message(phone_number: str, sender: str, content: str, msg_type: str, response_time_ms: int = None):
     """Store message in MongoDB or fallback storage"""
     if mongo_client is not None:
@@ -616,6 +673,8 @@ async def store_message(phone_number: str, sender: str, content: str, msg_type: 
         MESSAGE_STORE[phone_number].append(entry)
 
 # -------- CHATGPT --------
+
+
 async def ask_chatgpt(user_number: str, user_message: str) -> str:
     if user_number not in USER_HISTORY:
         USER_HISTORY[user_number] = deque(maxlen=MAX_HISTORY)
@@ -628,12 +687,14 @@ async def ask_chatgpt(user_number: str, user_message: str) -> str:
             print(f"⚡ CACHE HIT: {faq_key[:60]}")
             print(f"⚡ CACHE HIT - RESPONSE SERVED WITHOUT OPENAI")
             # Still append to history so conversation context stays intact
-            USER_HISTORY[user_number].append({"role": "user", "content": user_message})
-            USER_HISTORY[user_number].append({"role": "assistant", "content": cached_reply})
+            USER_HISTORY[user_number].append(
+                {"role": "user", "content": user_message})
+            USER_HISTORY[user_number].append(
+                {"role": "assistant", "content": cached_reply})
             return cached_reply
         else:
             print(f"🔍 CACHE MISS: {faq_key[:60]}")
-    
+
     USER_HISTORY[user_number].append({"role": "user", "content": user_message})
 
     # System prompt sent every turn
@@ -667,7 +728,8 @@ async def ask_chatgpt(user_number: str, user_message: str) -> str:
         print(f"✅ OPENAI REQUEST END - {elapsed:.2f} seconds")
 
         reply = response.choices[0].message.content.strip()
-        USER_HISTORY[user_number].append({"role": "assistant", "content": reply})
+        USER_HISTORY[user_number].append(
+            {"role": "assistant", "content": reply})
         future.set_result(reply)
 
         # Store in FAQ cache if eligible
@@ -682,13 +744,14 @@ async def ask_chatgpt(user_number: str, user_message: str) -> str:
     finally:
         INFLIGHT_REQUESTS.pop(inflight_key, None)
 
+
 @app.post("/whatsappDemo")
 async def send_whatsapp_demo(request: Request):
     sid = config.CONTENT_SID
-    
+
     data = await request.json()
     raw_number = data.get("phone_number", "").strip()
-    
+
     # Format number correctly: whatsapp:+[country_code][number]
     clean_number = raw_number.replace("whatsapp:", "").strip()
     if not clean_number.startswith("+"):
@@ -709,12 +772,83 @@ async def send_whatsapp_demo(request: Request):
         print(f"❌ Error for {formatted_target}: {e}")
         return {"success": False, "error": str(e)}
 
+
+@app.post("/sendFormTemplate")
+async def send_form_template(request: Request):
+    """Send the form-sending WhatsApp template, with automatic SMS fallback.
+    Used by the voice agent and the dashboard to deliver the requirements/booking form."""
+    form_sid = config.FORM_SENDING_SID
+
+    data = await request.json()
+    raw_number = data.get("phone_number", "").strip()
+    call_id = data.get("call_id")  # Optional: to correlate with a call log
+
+    # Format number correctly: whatsapp:+[country_code][number]
+    clean_number = raw_number.replace("whatsapp:", "").strip()
+    if not clean_number.startswith("+"):
+        clean_number = f"+{clean_number}"
+    formatted_target = f"whatsapp:{clean_number}"
+
+    if not twilio_client:
+        return {"success": False, "error": "Twilio client not configured", "phone_number": clean_number, "call_id": call_id}
+    if not form_sid:
+        return {"success": False, "error": "FORM_SENDING_SID not configured", "phone_number": clean_number, "call_id": call_id}
+
+    try:
+        message = twilio_client.messages.create(
+            from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
+            to=formatted_target,
+            content_sid=form_sid,
+        )
+        print(
+            f"✅ Form template sent to {formatted_target}! SID: {message.sid}")
+        return {
+            "success": True,
+            "sid": message.sid,
+            "channel": "whatsapp",
+            "phone_number": clean_number,
+            "call_id": call_id,
+            "message": "WhatsApp sent successfully",
+        }
+    except Exception as e:
+        error_str = str(e)
+        print(f"❌ WhatsApp API error for {formatted_target}: {e}")
+
+        # Immediate SMS fallback for known WhatsApp delivery errors
+        if "63016" in error_str or "21211" in error_str:
+            try:
+                sms_from = os.getenv(
+                    "TWILIO_SMS_NUMBER") or TWILIO_WHATSAPP_NUMBER
+                sms_message = twilio_client.messages.create(
+                    from_=sms_from.replace("whatsapp:", ""),
+                    to=clean_number,
+                    body="We are sending this from Autonomiq. Kindly fill this form: https://autonomiq.ae/company-details",
+                )
+                print(
+                    f"✅ SMS fallback sent to {clean_number}! SID: {sms_message.sid}")
+                return {
+                    "success": True,
+                    "sid": sms_message.sid,
+                    "channel": "sms",
+                    "fallback": True,
+                    "phone_number": clean_number,
+                    "call_id": call_id,
+                    "message": "WhatsApp failed, SMS sent instead",
+                }
+            except Exception as sms_error:
+                print(f"❌ SMS fallback also failed: {sms_error}")
+                return {"success": False, "error": f"Both WhatsApp and SMS failed: {sms_error}", "phone_number": clean_number, "call_id": call_id}
+
+        return {"success": False, "error": error_str, "phone_number": clean_number, "call_id": call_id}
+
 # -------- SEND TYPING INDICATOR --------
+
+
 async def send_typing_indicator(to_number: str):
     """Send typing indicator to show bot is processing"""
     if not twilio_client:
         return
-    
+
     try:
         # Send a reaction or empty message to trigger typing indicator
         # Note: WhatsApp Business API has limited typing indicator support
@@ -729,14 +863,16 @@ async def send_typing_indicator(to_number: str):
         print(f"Typing indicator failed (non-critical): {e}")
 
 # -------- WHATSAPP WEBHOOK --------
+
+
 @app.post("/whatsapp")
 async def whatsapp_webhook(request: Request):
     webhook_start = time.time()
-    
+
     form = await request.form()
     user_message = form.get("Body", "").strip()
     user_number = form.get("From", "")
-    
+
     print(f"\n📨 [{user_number}] User: \"{user_message}\"")
 
     # Track when user last messaged (for 24-hour window)
@@ -745,12 +881,13 @@ async def whatsapp_webhook(request: Request):
 
     # Store user message to permanent chat history
     await store_message(user_number, "user", user_message, "user")
-    
+
     resp = MessagingResponse()
 
     # Check if human has taken over
     if await get_human_takeover_status(user_number):
-        print(f"🧑 Human mode active for {user_number}, not sending AI response")
+        print(
+            f"🧑 Human mode active for {user_number}, not sending AI response")
         return Response(content=str(resp), media_type="text/xml")
 
     try:
@@ -761,10 +898,12 @@ async def whatsapp_webhook(request: Request):
                 USER_HISTORY[user_number] = deque(maxlen=MAX_HISTORY)
             # Inject KB once into history
             USER_HISTORY[user_number].appendleft(
-                {"role": "assistant", "content": "Understood. I have the product knowledge ready."}
+                {"role": "assistant",
+                    "content": "Understood. I have the product knowledge ready."}
             )
             USER_HISTORY[user_number].appendleft(
-                {"role": "user", "content": f"[KNOWLEDGE BASE]\n\n{KNOWLEDGE_BASE}"}
+                {"role": "user",
+                    "content": f"[KNOWLEDGE BASE]\n\n{KNOWLEDGE_BASE}"}
             )
             try:
                 await asyncio.to_thread(
@@ -775,11 +914,13 @@ async def whatsapp_webhook(request: Request):
                         "body": GREETING_MESSAGE
                     }
                 )
-                greet_time_ms = int((time.time() - webhook_receive_time) * 1000)
+                greet_time_ms = int(
+                    (time.time() - webhook_receive_time) * 1000)
                 await store_message(user_number, "agent", GREETING_MESSAGE, "ai", greet_time_ms)
                 await set_greeted(user_number)
                 await update_kb_check_info(user_number, get_kb_hash())
-                print(f"👋 [{user_number}] Greeting sent in {greet_time_ms / 1000:.2f}s")
+                print(
+                    f"👋 [{user_number}] Greeting sent in {greet_time_ms / 1000:.2f}s")
             except Exception as greet_err:
                 print(f"⚠️ [{user_number}] Greeting failed: {greet_err}")
             return Response(content=str(resp), media_type="text/xml")
@@ -789,10 +930,12 @@ async def whatsapp_webhook(request: Request):
             if user_number not in USER_HISTORY:
                 USER_HISTORY[user_number] = deque(maxlen=MAX_HISTORY)
             USER_HISTORY[user_number].appendleft(
-                {"role": "assistant", "content": "Understood. I have the product knowledge ready."}
+                {"role": "assistant",
+                    "content": "Understood. I have the product knowledge ready."}
             )
             USER_HISTORY[user_number].appendleft(
-                {"role": "user", "content": f"[KNOWLEDGE BASE]\n\n{KNOWLEDGE_BASE}"}
+                {"role": "user",
+                    "content": f"[KNOWLEDGE BASE]\n\n{KNOWLEDGE_BASE}"}
             )
             # Record hash and check time for freshly injected KB
             await update_kb_check_info(user_number, get_kb_hash())
@@ -804,14 +947,16 @@ async def whatsapp_webhook(request: Request):
             now = datetime.now(timezone.utc)
             due_for_check = (
                 last_checked is None or
-                (now - (last_checked.replace(tzinfo=timezone.utc) if last_checked.tzinfo is None else last_checked)) >= timedelta(hours=KB_CHECK_INTERVAL_HOURS)
+                (now - (last_checked.replace(tzinfo=timezone.utc)
+                 if last_checked.tzinfo is None else last_checked)) >= timedelta(hours=KB_CHECK_INTERVAL_HOURS)
             )
             if due_for_check:
                 fresh_kb = reload_knowledge_base()
                 current_hash = get_kb_hash()
                 if current_hash != stored_hash:
                     # KB changed — replace the injected KB messages in history
-                    print(f"🔄 [{user_number}] KB changed, re-injecting updated knowledge base")
+                    print(
+                        f"🔄 [{user_number}] KB changed, re-injecting updated knowledge base")
                     # Remove old KB messages (first two items in history are user KB + assistant ack)
                     history_list = list(USER_HISTORY[user_number])
                     # Drop stale KB entries (they are always the first two)
@@ -819,10 +964,12 @@ async def whatsapp_webhook(request: Request):
                         history_list = history_list[2:]
                     new_history = deque(history_list, maxlen=MAX_HISTORY)
                     new_history.appendleft(
-                        {"role": "assistant", "content": "Understood. I have the product knowledge ready."}
+                        {"role": "assistant",
+                            "content": "Understood. I have the product knowledge ready."}
                     )
                     new_history.appendleft(
-                        {"role": "user", "content": f"[KNOWLEDGE BASE]\n\n{fresh_kb}"}
+                        {"role": "user",
+                            "content": f"[KNOWLEDGE BASE]\n\n{fresh_kb}"}
                     )
                     USER_HISTORY[user_number] = new_history
                 else:
@@ -833,12 +980,12 @@ async def whatsapp_webhook(request: Request):
         # Check if we're waiting for confirmation
         if await get_pending_confirmation(user_number):
             is_response, is_yes = is_confirmation_response(user_message)
-            
+
             if is_response:
                 if is_yes:
                     # User confirmed - send template and activate human takeover
                     print(f"✅ User confirmed human connection: {user_number}")
-                    
+
                     try:
                         # Send template to customer
                         await asyncio.to_thread(
@@ -849,12 +996,14 @@ async def whatsapp_webhook(request: Request):
                                 "content_sid": HUMAN_TAKEOVER_SID
                             }
                         )
-                        
+
                         # Store template message
-                        takeover_time_ms = int((time.time() - webhook_receive_time) * 1000)
+                        takeover_time_ms = int(
+                            (time.time() - webhook_receive_time) * 1000)
                         await store_message(user_number, "agent", "Connecting you to a support executive...", "ai", takeover_time_ms)
-                        print(f"✅ [{user_number}] Human takeover sent in {takeover_time_ms / 1000:.2f}s")
-                        
+                        print(
+                            f"✅ [{user_number}] Human takeover sent in {takeover_time_ms / 1000:.2f}s")
+
                         # Send alert to owner
                         try:
                             await asyncio.to_thread(
@@ -867,19 +1016,22 @@ async def whatsapp_webhook(request: Request):
                                 }
                             )
                         except Exception as alert_error:
-                            print(f"⚠️ [{user_number}] Owner alert failed: {alert_error}")
-                        
+                            print(
+                                f"⚠️ [{user_number}] Owner alert failed: {alert_error}")
+
                         # Activate human takeover
                         await update_human_takeover(user_number, True)
                         await set_pending_confirmation(user_number, False)
-                        
+
                         # Return empty response since template was sent
                         return Response(content=str(resp), media_type="text/xml")
-                        
+
                     except Exception as template_error:
-                        print(f"❌ [{user_number}] Human takeover template failed: {template_error}")
+                        print(
+                            f"❌ [{user_number}] Human takeover template failed: {template_error}")
                         error_msg = "Sorry, I couldn't connect you right now. Please try again."
-                        err_time_ms = int((time.time() - webhook_receive_time) * 1000)
+                        err_time_ms = int(
+                            (time.time() - webhook_receive_time) * 1000)
                         await store_message(user_number, "agent", error_msg, "ai", err_time_ms)
                         resp.message().body(error_msg)
                         await set_pending_confirmation(user_number, False)
@@ -888,47 +1040,51 @@ async def whatsapp_webhook(request: Request):
                     # User said no - continue with AI and DON'T check for human request again
                     print(f"❌ User declined human connection: {user_number}")
                     await set_pending_confirmation(user_number, False)
-                    
+
                     # Check if user included a question in their "no" response
                     # e.g., "No, I need to know about company more"
                     if len(user_message.split()) > 3:  # More than just "no" or "nope"
                         # User included additional text, process it as a question
-                        print(f"📝 User declined and asked a question: {user_message}")
-                        
+                        print(
+                            f"📝 User declined and asked a question: {user_message}")
+
                         reply = await ask_chatgpt(user_number, user_message)
-                        reply_time_ms = int((time.time() - webhook_receive_time) * 1000)
+                        reply_time_ms = int(
+                            (time.time() - webhook_receive_time) * 1000)
                         await store_message(user_number, "agent", reply, "ai", reply_time_ms)
                         resp.message().body(reply)
                     else:
                         # Just a simple "no"
                         confirmation_msg = "No problem! I'll continue helping you. What can I assist you with?"
-                        conf_time_ms = int((time.time() - webhook_receive_time) * 1000)
+                        conf_time_ms = int(
+                            (time.time() - webhook_receive_time) * 1000)
                         await store_message(user_number, "agent", confirmation_msg, "ai", conf_time_ms)
                         resp.message().body(confirmation_msg)
-                    
+
                     return Response(content=str(resp), media_type="text/xml")
             else:
                 # Not a clear yes/no - treat as a new question, clear pending state, and process normally
-                print(f"⚠️ User sent different message while pending confirmation, clearing state: {user_message}")
+                print(
+                    f"⚠️ User sent different message while pending confirmation, clearing state: {user_message}")
                 await set_pending_confirmation(user_number, False)
                 # Continue to normal AI processing (don't check for human request again)
                 # This prevents false triggers when user asks new questions after saying "no"
-        
+
         # Only check for human request if NOT coming from a pending confirmation state
         elif is_human_request(user_message):
             print(f"👤 User requested human agent: {user_number}")
-            
+
             # Ask for confirmation
             await set_pending_confirmation(user_number, True)
             confirmation_msg = "Would you like me to connect you to a support executive?"
-            
+
             conf_time_ms = int((time.time() - webhook_receive_time) * 1000)
             await store_message(user_number, "agent", confirmation_msg, "ai", conf_time_ms)
             resp.message().body(confirmation_msg)
-            
+
             print(f"❓ Confirmation request sent to {user_number}")
             return Response(content=str(resp), media_type="text/xml")
-        
+
         # --- GREETING SHORTCUT: bypass LLM for pure greeting messages ---
         if is_greeting(user_message):
             reply = "Hello! What brings you here today? How can I help you?"
@@ -946,19 +1102,19 @@ async def whatsapp_webhook(request: Request):
     except Exception as e:
         print("ERROR:", e)
         error_msg = "I'm sorry, I hit a snag. Try again?"
-        
+
         # Store error message with response time
         err_time_ms = int((time.time() - webhook_receive_time) * 1000)
         await store_message(user_number, "agent", error_msg, "ai", err_time_ms)
-        print(f"❌ [{user_number}] Error response sent in {err_time_ms / 1000:.2f}s — {e}")
-        
+        print(
+            f"❌ [{user_number}] Error response sent in {err_time_ms / 1000:.2f}s — {e}")
+
         resp.message().body(error_msg)
 
     return Response(
         content=str(resp),
         media_type="text/xml"
     )
-    
 
 
 # -------- KB INJECTION TEST ENDPOINT --------
@@ -977,6 +1133,7 @@ async def test_kb(phone: str):
         "second_message_preview": history[1]["content"][:80] if len(history) > 1 else None,
     }
 
+
 @app.post("/test-chat")
 async def test_chat(request: Request):
     """Test endpoint to simulate a WhatsApp message without Twilio"""
@@ -993,6 +1150,7 @@ async def test_chat(request: Request):
     }
 
 # -------- DASHBOARD API ENDPOINTS --------
+
 
 @app.get("/conversations")
 async def get_conversations():
@@ -1042,38 +1200,41 @@ async def get_conversations():
     CONVERSATIONS_CACHE["expires_at"] = now + 30  # 30-second TTL
     return conversations
 
+
 @app.get("/messages/{phone_number}")
 async def get_messages(phone_number: str):
     """Get all messages for a specific conversation"""
     # Handle URL encoding
     phone_number = phone_number.replace("%3A", ":")
-    
+
     if mongo_client is not None:
         # Get from MongoDB - get ALL messages (no limit)
         messages = await get_chat_history(phone_number, limit=None)
-        
+
         result = [{
             "sender": msg["sender"],
             "content": msg["content"],
             "timestamp": msg["timestamp"].isoformat() + "+00:00" if not msg["timestamp"].isoformat().endswith(('Z', '+00:00')) else msg["timestamp"].isoformat(),
             "type": msg["type"],
-            "response_time_ms": msg.get("response_time_ms")  # None for user messages
+            # None for user messages
+            "response_time_ms": msg.get("response_time_ms")
         } for msg in messages]
-        
+
         return result
     else:
         # Fallback to in-memory storage
         return MESSAGE_STORE.get(phone_number, [])
+
 
 @app.post("/takeover")
 async def takeover_conversation(request: Request):
     """Human agent takes over the conversation and sends template message"""
     data = await request.json()
     phone_number = data.get("phone_number")
-    
+
     if not phone_number:
         raise HTTPException(status_code=400, detail="phone_number is required")
-    
+
     await update_human_takeover(phone_number, True)
     print(f"🧑 Human takeover activated for {phone_number}")
     CONVERSATIONS_CACHE["data"] = None  # Invalidate dashboard cache
@@ -1086,13 +1247,14 @@ async def takeover_conversation(request: Request):
                 "content_sid": HUMAN_TAKEOVER_SID
             }
         )
-        
+
         # Store template message
         await store_message(phone_number, "agent", "Human agent has joined the conversation (template sent)", "human")
-        
-        print(f"✅ Template sent automatically on takeover, SID: {twilio_message.sid}")
+
+        print(
+            f"✅ Template sent automatically on takeover, SID: {twilio_message.sid}")
         return {
-            "success": True, 
+            "success": True,
             "message": "Takeover successful, template sent",
             "template_sent": True,
             "sid": twilio_message.sid
@@ -1100,26 +1262,28 @@ async def takeover_conversation(request: Request):
     except Exception as e:
         print(f"⚠️ Takeover successful but template failed: {e}")
         return {
-            "success": True, 
+            "success": True,
             "message": "Takeover successful but template failed to send",
             "template_sent": False,
             "error": str(e)
         }
+
 
 @app.post("/release")
 async def release_conversation(request: Request):
     """Release conversation back to AI"""
     data = await request.json()
     phone_number = data.get("phone_number")
-    
+
     if not phone_number:
         raise HTTPException(status_code=400, detail="phone_number is required")
-    
+
     await update_human_takeover(phone_number, False)
     print(f"🤖 AI mode restored for {phone_number}")
     CONVERSATIONS_CACHE["data"] = None  # Invalidate dashboard cache
-    
+
     return {"success": True, "message": "Released to AI"}
+
 
 @app.post("/send-message")
 async def send_message(request: Request):
@@ -1128,14 +1292,16 @@ async def send_message(request: Request):
     phone_number = data.get("phone_number")
     message = data.get("message")
     use_template = data.get("use_template", False)
-    
+
     if not phone_number or not message:
-        raise HTTPException(status_code=400, detail="phone_number and message are required")
-    
+        raise HTTPException(
+            status_code=400, detail="phone_number and message are required")
+
     # Check if human has taken over
     if not await get_human_takeover_status(phone_number):
-        raise HTTPException(status_code=403, detail="Must take over conversation first")
-    
+        raise HTTPException(
+            status_code=403, detail="Must take over conversation first")
+
     try:
         if use_template:
             twilio_message = await asyncio.to_thread(
@@ -1155,23 +1321,23 @@ async def send_message(request: Request):
                     "body": message
                 }
             )
-        
+
         # Store message
         await store_message(phone_number, "agent", message, "human")
-        
+
         print(f"✅ Human agent sent message to {phone_number}")
         return {"success": True, "message": "Message sent", "sid": twilio_message.sid}
-    
+
     except Exception as e:
         error_str = str(e)
         print(f"❌ Error sending message: {error_str}")
-        
+
         # Check if it's the 63016 error (outside messaging window)
         if "63016" in error_str:
             return {
-                "success": False, 
+                "success": False,
                 "error": "Outside 24-hour messaging window. User must message you first, or use an approved template.",
                 "error_code": "63016"
             }
-        
+
         raise HTTPException(status_code=500, detail=error_str)
