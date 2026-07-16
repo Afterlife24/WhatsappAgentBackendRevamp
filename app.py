@@ -2,6 +2,7 @@ import os
 import asyncio
 import time
 import hashlib
+import certifi
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.twiml.messaging_response import MessagingResponse
@@ -61,7 +62,10 @@ chats_collection = None
 
 try:
     mongo_client = AsyncIOMotorClient(
-        MONGODB_URL, serverSelectionTimeoutMS=5000)
+        MONGODB_URL,
+        serverSelectionTimeoutMS=5000,
+        tlsCAFile=certifi.where()
+    )
     db = mongo_client[MONGODB_DATABASE]
     sessions_collection = db['sessions']
     chats_collection = db['chats']
@@ -119,6 +123,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # -------- LOAD PROMPTS --------
@@ -1152,9 +1157,28 @@ async def test_chat(request: Request):
 # -------- DASHBOARD API ENDPOINTS --------
 
 
+WINDOW_HOURS = 24  # WhatsApp 24-hour messaging window
+
+
+def _is_within_window(last_user_time) -> bool:
+    """Return True if the last user message was within the 24-hour window."""
+    if last_user_time is None:
+        return False
+    if isinstance(last_user_time, str):
+        try:
+            last_user_time = datetime.fromisoformat(last_user_time.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if last_user_time.tzinfo is None:
+        last_user_time = last_user_time.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_user_time) < timedelta(hours=WINDOW_HOURS)
+
+
 @app.get("/conversations")
 async def get_conversations():
-    """Get all active conversations — cached for 30 seconds"""
+    """Get conversations — active (within 24h window) returned first, expired last.
+    Both sets are returned so the dashboard can show history when a user returns.
+    The 'within_24h_window' flag tells the dashboard which are active."""
     now = time.monotonic()
     if CONVERSATIONS_CACHE["data"] is not None and now < CONVERSATIONS_CACHE["expires_at"]:
         return CONVERSATIONS_CACHE["data"]
@@ -1166,8 +1190,15 @@ async def get_conversations():
         async for session in sessions:
             phone_number = session["phone_number"]
 
+            # Get the last message overall (for display)
             last_chat = await chats_collection.find_one(
                 {"phone_number": phone_number},
+                sort=[("timestamp", -1)]
+            )
+
+            # Get the last USER message specifically (for 24h window check)
+            last_user_chat = await chats_collection.find_one(
+                {"phone_number": phone_number, "sender": "user"},
                 sort=[("timestamp", -1)]
             )
 
@@ -1179,26 +1210,73 @@ async def get_conversations():
                 else:
                     timestamp_str = iso_time
 
+            last_user_time_str = ""
+            if last_user_chat:
+                iso_time = last_user_chat["timestamp"].isoformat()
+                if not iso_time.endswith(('Z', '+00:00')):
+                    last_user_time_str = iso_time + "+00:00"
+                else:
+                    last_user_time_str = iso_time
+
+            within_window = _is_within_window(
+                last_user_chat["timestamp"] if last_user_chat else None
+            )
+
             conversations.append({
                 "phone_number": phone_number,
                 "human_takeover": session.get("human_takeover", False),
                 "last_message": last_chat["content"] if last_chat else "",
-                "last_message_time": timestamp_str
+                "last_message_time": timestamp_str,
+                "last_user_message_time": last_user_time_str,
+                "within_24h_window": within_window,
             })
     else:
+        # Fallback: in-memory storage
         for phone_number in MESSAGE_STORE.keys():
             messages = MESSAGE_STORE[phone_number]
             last_message = messages[-1] if messages else None
+
+            # Find the last user message for the window check
+            last_user_msg = next(
+                (m for m in reversed(messages) if m.get("sender") == "user"), None
+            )
+            last_user_time = (
+                last_user_msg["timestamp"]
+                if last_user_msg else
+                LAST_USER_MESSAGE_TIME.get(phone_number)
+            )
+            within_window = _is_within_window(last_user_time)
+
             conversations.append({
                 "phone_number": phone_number,
                 "human_takeover": HUMAN_TAKEOVER.get(phone_number, False),
                 "last_message": last_message["content"] if last_message else "",
-                "last_message_time": last_message["timestamp"] if last_message else ""
+                "last_message_time": last_message["timestamp"] if last_message else "",
+                "last_user_message_time": last_user_time.isoformat() if hasattr(last_user_time, 'isoformat') else (last_user_time or ""),
+                "within_24h_window": within_window,
             })
+
+    # Sort: active (within window) first, then expired — both groups sorted by recency
+    conversations.sort(
+        key=lambda c: (
+            0 if c["within_24h_window"] else 1,
+            -(new_ts.timestamp() if (new_ts := _parse_ts(c["last_message_time"])) else 0)
+        )
+    )
 
     CONVERSATIONS_CACHE["data"] = conversations
     CONVERSATIONS_CACHE["expires_at"] = now + 30  # 30-second TTL
     return conversations
+
+
+def _parse_ts(ts_str: str):
+    """Parse an ISO timestamp string to a datetime, or return None."""
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 @app.get("/messages/{phone_number}")
